@@ -19,8 +19,12 @@
 #endif
 #include <opencv2/core/core.hpp>
 
+#ifndef OPTIMIZE_FOR_AMD
 #define OPTIMIZE_FOR_AMD 1
+#endif
+#ifndef OPTIMIZE_FOR_INTEL
 #define OPTIMIZE_FOR_INTEL 0
+#endif
 
 #define DIVUP(total, grain) ((total + grain - 1) / (grain))
 #define DIVDOWN(total, grain) ((total) / (grain))

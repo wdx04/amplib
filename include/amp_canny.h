@@ -45,11 +45,11 @@ namespace amp
 				int cols = src_array.get_extent()[1];
 
 				tile_static int smem[tile_size][tile_size + 2];
-				smem[lidy][lidx + 1] = int(fast_math::roundf(src_array(direct3d::imin(gidy, rows - 1), gidx)));
-				if(lidx == 0)
+				smem[lidy][lidx + 1] = int(fast_math::roundf(guarded_read_replicate(src_array, idx)));
+				if (lidx == 0)
 				{
-					smem[lidy][0] = int(fast_math::roundf(src_array(direct3d::imin(gidy, rows - 1), direct3d::imax(gidx - 1, 0))));
-					smem[lidy][tile_size + 1] = int(fast_math::roundf(src_array(direct3d::imin(gidy, rows - 1), direct3d::imin(gidx + tile_size, cols - 1))));
+					smem[lidy][0] = int(fast_math::roundf(guarded_read_replicate(src_array, concurrency::index<2>(gidy, gidx - 1))));
+					smem[lidy][tile_size + 1] = int(fast_math::roundf(guarded_read_replicate(src_array, concurrency::index<2>(gidy, gidx + tile_size))));
 				}
 				idx.barrier.wait_with_tile_static_memory_fence();
 
@@ -84,25 +84,25 @@ namespace amp
 				tile_static int sdx[tile_size + 2][tile_size];
 				tile_static int sdy[tile_size + 2][tile_size];
 
-				sdx[lidy + 1][lidx] = dx_buf(direct3d::imin(gidy, rows - 1), gidx);
-				sdy[lidy + 1][lidx] = dy_buf(direct3d::imin(gidy, rows - 1), gidx);
-				if(lidy == 0)
+				sdx[lidy + 1][lidx] = guarded_read_replicate(dx_buf, idx);
+				sdy[lidy + 1][lidx] = guarded_read_replicate(dy_buf, idx);
+				if (lidy == 0)
 				{
-					sdx[0][lidx] = dx_buf(direct3d::imin(direct3d::imax(gidy - 1, 0), rows - 1), gidx);
-					sdx[tile_size + 1][lidx] = dx_buf(direct3d::imin(gidy + tile_size, rows - 1), gidx);
+					sdx[0][lidx] = guarded_read_replicate(dx_buf, concurrency::index<2>(gidy - 1, gidx));
+					sdx[tile_size + 1][lidx] = guarded_read_replicate(dx_buf, concurrency::index<2>(gidy + tile_size, gidx));
 
-					sdy[0][lidx] = dy_buf(direct3d::imin(direct3d::imax(gidy - 1, 0), rows - 1), gidx);
-					sdy[tile_size + 1][lidx] = dy_buf(direct3d::imin(gidy + tile_size, rows - 1), gidx);
+					sdy[0][lidx] = guarded_read_replicate(dy_buf, concurrency::index<2>(gidy - 1, gidx));
+					sdy[tile_size + 1][lidx] = guarded_read_replicate(dy_buf, concurrency::index<2>(gidy + tile_size, gidx));
 				}
 				idx.barrier.wait_with_tile_static_memory_fence();
 
 				int x = sdx[lidy][lidx] + 2 * sdx[lidy + 1][lidx] + sdx[lidy + 2][lidx];
 				int y = -sdy[lidy][lidx] + sdy[lidy + 2][lidx];
-				if(gidx < cols && gidy < rows)
+				if (gidx < cols && gidy < rows)
 				{
-					dx(idx.global) = x;
-					dy(idx.global) = y;
-					mag_buf(concurrency::index<2>(gidy + 1, gidx + 1)) = l2_grad ? fast_math::sqrtf(float(x * x + y * y)) : float(direct3d::abs(x) + direct3d::abs(y));
+					guarded_write(dx, idx.global, x);
+					guarded_write(dy, idx.global, y);
+					guarded_write(mag_buf, concurrency::index<2>(gidy + 1, gidx + 1), l2_grad ? fast_math::sqrtf(float(x * x + y * y)) : float(direct3d::abs(x) + direct3d::abs(y)));
 				}
 			});
 		}
@@ -136,20 +136,20 @@ namespace amp
 				int tid = lidx + lidy * tile_size;
 				int lx = tid % (tile_size + 2);
 				int ly = tid / (tile_size + 2);
-				if(ly < tile_size - 2)
+				if (ly < tile_size - 2)
 				{
-					smem[ly][lx] = mag_buf(direct3d::imin(grp_idy + ly, rows - 1), grp_idx + lx);
+					smem[ly][lx] = guarded_read_replicate(mag_buf, concurrency::index<2>(grp_idy + ly, grp_idx + lx));
 				}
-				if(ly < 4 && grp_idy + ly + tile_size - 2 <= rows && grp_idx + lx <= cols)
+				if (ly < 4 && grp_idy + ly + tile_size - 2 <= rows && grp_idx + lx <= cols)
 				{
-					smem[ly + tile_size - 2][lx] = mag_buf(direct3d::imin(grp_idy + ly + tile_size - 2, rows - 1), grp_idx + lx);
+					smem[ly + tile_size - 2][lx] = guarded_read_replicate(mag_buf, concurrency::index<2>(grp_idy + ly + tile_size - 2, grp_idx + lx));
 				}
 				idx.barrier.wait_with_tile_static_memory_fence();
 
-				if(gidy < rows && gidx < cols)
+				if (gidy < rows && gidx < cols)
 				{
-					int x = dx(idx.global);
-					int y = dy(idx.global);
+					int x = guarded_read_replicate(dx, idx.global);
+					int y = guarded_read_replicate(dy, idx.global);
 					const int s = (x ^ y) < 0 ? -1 : 1;
 					const float m = smem[lidy + 1][lidx + 1];
 					x = direct3d::abs(x);
@@ -159,34 +159,34 @@ namespace amp
 					// 1 - the pixel might belong to an edge
 					// 2 - the pixel does belong to an edge
 					int edge_type = 0;
-					if(m > low_thresh)
+					if (m > low_thresh)
 					{
 						const int tg22x = x * tg22;
 						const int tg67x = tg22x + (x << (1 + canny_shift));
 						y <<= canny_shift;
-						if(y < tg22x)
+						if (y < tg22x)
 						{
-							if(m > smem[lidy + 1][lidx] && m >= smem[lidy + 1][lidx + 2])
+							if (m > smem[lidy + 1][lidx] && m >= smem[lidy + 1][lidx + 2])
 							{
 								edge_type = 1 + (int)(m > high_thresh);
 							}
 						}
-						else if(y > tg67x)
+						else if (y > tg67x)
 						{
-							if(m > smem[lidy][lidx + 1] && m >= smem[lidy + 2][lidx + 1])
+							if (m > smem[lidy][lidx + 1] && m >= smem[lidy + 2][lidx + 1])
 							{
 								edge_type = 1 + (int)(m > high_thresh);
 							}
 						}
 						else
 						{
-							if(m > smem[lidy][lidx + 1 - s] && m > smem[lidy + 2][lidx + 1 + s])
+							if (m > smem[lidy][lidx + 1 - s] && m > smem[lidy + 2][lidx + 1 + s])
 							{
 								edge_type = 1 + (int)(m > high_thresh);
 							}
 						}
 					}
-					map_buf(gidy + 1, gidx + 1) = edge_type;
+					guarded_write(map_buf, concurrency::index<2>(gidy + 1, gidx + 1), edge_type);
 				}
 			});
 		}
@@ -214,30 +214,30 @@ namespace amp
 				const int y = idx.global[0];
 
 				smem[threadIdx.y + 1][threadIdx.x + 1] = guarded_read(map_buf, concurrency::index<2>(y + 1, x + 1));
-				if(threadIdx.y == 0)
+				if (threadIdx.y == 0)
 					smem[0][threadIdx.x + 1] = guarded_read(map_buf, concurrency::index<2>(y, x + 1));
-				if(threadIdx.y == blockDim.y - 1)
+				if (threadIdx.y == blockDim.y - 1)
 					smem[blockDim.y + 1][threadIdx.x + 1] = guarded_read(map_buf, concurrency::index<2>(y + 2, x + 1));
-				if(threadIdx.x == 0)
+				if (threadIdx.x == 0)
 					smem[threadIdx.y + 1][0] = guarded_read(map_buf, concurrency::index<2>(y + 1, x));
-				if(threadIdx.x == blockDim.x - 1)
+				if (threadIdx.x == blockDim.x - 1)
 					smem[threadIdx.y + 1][blockDim.x + 1] = guarded_read(map_buf, concurrency::index<2>(y + 1, x + 2));
-				if(threadIdx.x == 0 && threadIdx.y == 0)
+				if (threadIdx.x == 0 && threadIdx.y == 0)
 					smem[0][0] = guarded_read(map_buf, concurrency::index<2>(y, x));
-				if(threadIdx.x == blockDim.x - 1 && threadIdx.y == 0)
+				if (threadIdx.x == blockDim.x - 1 && threadIdx.y == 0)
 					smem[0][blockDim.x + 1] = guarded_read(map_buf, concurrency::index<2>(y, x + 2));
-				if(threadIdx.x == 0 && threadIdx.y == blockDim.y - 1)
+				if (threadIdx.x == 0 && threadIdx.y == blockDim.y - 1)
 					smem[blockDim.y + 1][0] = guarded_read(map_buf, concurrency::index<2>(y + 2, x));
-				if(threadIdx.x == blockDim.x - 1 && threadIdx.y == blockDim.y - 1)
+				if (threadIdx.x == blockDim.x - 1 && threadIdx.y == blockDim.y - 1)
 					smem[blockDim.y + 1][blockDim.x + 1] = guarded_read(map_buf, concurrency::index<2>(y + 2, x + 2));
 				idx.barrier.wait_with_tile_static_memory_fence();
 
 				int n;
 				// TODO unroll
-				for(int k = 0; k < tile_size; ++k)
+				for (int k = 0; k < tile_size; ++k)
 				{
 					n = 0;
-					if(smem[threadIdx.y + 1][threadIdx.x + 1] == 1)
+					if (smem[threadIdx.y + 1][threadIdx.x + 1] == 1)
 					{
 						n += smem[threadIdx.y][threadIdx.x] == 2;
 						n += smem[threadIdx.y][threadIdx.x + 1] == 2;
@@ -248,14 +248,14 @@ namespace amp
 						n += smem[threadIdx.y + 2][threadIdx.x + 1] == 2;
 						n += smem[threadIdx.y + 2][threadIdx.x + 2] == 2;
 					}
-					if(n > 0)
+					if (n > 0)
 						smem[threadIdx.y + 1][threadIdx.x + 1] = 2;
 					idx.barrier.wait_with_tile_static_memory_fence();
 				}
 				const int e = smem[threadIdx.y + 1][threadIdx.x + 1];
 				guarded_write(map_buf, concurrency::index<2>(y + 1, x + 1), e);
 				n = 0;
-				if(e == 2)
+				if (e == 2)
 				{
 					n += smem[threadIdx.y][threadIdx.x] == 1;
 					n += smem[threadIdx.y][threadIdx.x + 1] == 1;
@@ -268,7 +268,7 @@ namespace amp
 					n += smem[threadIdx.y + 2][threadIdx.x + 1] == 1;
 					n += smem[threadIdx.y + 2][threadIdx.x + 2] == 1;
 				}
-				if(n > 0)
+				if (n > 0)
 				{
 					const unsigned int ind = concurrency::atomic_fetch_inc(&counter[0]);
 					st[ind] = (unsigned int(y + 1) << 16) + unsigned int(x + 1);
@@ -296,11 +296,11 @@ namespace amp
 			static const int stack_size = 512;
 			array_view<int, 2> map_buf(ctx.map_buf);
 			array_view<unsigned int, 1> counter(ctx.counter);
-			while(true)
+			while (true)
 			{
 				unsigned int prev_counter = 0u;
 				concurrency::copy(counter, &prev_counter);
-				if(prev_counter == 0u)
+				if (prev_counter == 0u)
 				{
 					break;
 				}
@@ -325,22 +325,22 @@ namespace amp
 					tile_static unsigned int s_ind;
 					tile_static graphics::uint_2 s_st[stack_size];
 
-					if(lidx == 0)
+					if (lidx == 0)
 					{
 						s_counter = 0;
 					}
 					idx.barrier.wait_with_tile_static_memory_fence();
 
 					unsigned int ind = direct3d::mad(grp_idy, idx.tile_dim1, grp_idx);
-					if(ind < prev_counter)
+					if (ind < prev_counter)
 					{
 						unsigned int pos0 = st1[ind];
 						graphics::uint_2 pos(pos0 & 0xffff, pos0 >> 16);
-						if(lidx < 8)
+						if (lidx < 8)
 						{
 							pos.x += c.dx[lidx];
 							pos.y += c.dy[lidx];
-							if(guarded_read(map_buf, concurrency::index<2>(pos.y, pos.x)) == 1)
+							if (guarded_read(map_buf, concurrency::index<2>(pos.y, pos.x)) == 1)
 							{
 								guarded_write(map_buf, concurrency::index<2>(pos.y, pos.x), 2);
 								ind = concurrency::atomic_fetch_inc(&s_counter);
@@ -349,21 +349,21 @@ namespace amp
 						}
 						idx.barrier.wait_with_tile_static_memory_fence();
 
-						while(s_counter > 0 && s_counter <= stack_size - idx.tile_dim1)
+						while (s_counter > 0 && s_counter <= stack_size - idx.tile_dim1)
 						{
 							const int subTaskIdx = lidx >> 3;
 							const int portion = direct3d::umin(s_counter, (unsigned int)(idx.tile_dim1 >> 3));
-							if(subTaskIdx < portion)
+							if (subTaskIdx < portion)
 								pos = s_st[s_counter - 1 - subTaskIdx];
 							idx.barrier.wait_with_tile_static_memory_fence();
-							if(lidx == 0)
+							if (lidx == 0)
 								s_counter -= portion;
 							idx.barrier.wait_with_tile_static_memory_fence();
-							if(subTaskIdx < portion)
+							if (subTaskIdx < portion)
 							{
 								pos.x += c.dx[lidx & 7];
 								pos.y += c.dy[lidx & 7];
-								if(guarded_read(map_buf, concurrency::index<2>(pos.y, pos.x)) == 1)
+								if (guarded_read(map_buf, concurrency::index<2>(pos.y, pos.x)) == 1)
 								{
 									guarded_write(map_buf, concurrency::index<2>(pos.y, pos.x), 2);
 									ind = concurrency::atomic_fetch_inc(&s_counter);
@@ -372,16 +372,16 @@ namespace amp
 							}
 							idx.barrier.wait_with_tile_static_memory_fence();
 						}
-						if(s_counter > 0)
+						if (s_counter > 0)
 						{
-							if(lidx == 0)
+							if (lidx == 0)
 							{
 								ind = concurrency::atomic_fetch_add(&counter[0], s_counter);
 								s_ind = ind - s_counter;
 							}
 							idx.barrier.wait_with_tile_static_memory_fence();
 							ind = s_ind;
-							for(int i = lidx; i < (int)s_counter; i += idx.tile_dim1)
+							for (int i = lidx; i < (int)s_counter; i += idx.tile_dim1)
 							{
 								st2[ind + i] = (s_st[i].y << 16) + s_st[i].x;
 							}
@@ -409,7 +409,7 @@ namespace amp
 	inline void canny_32f_c1(canny_context& ctx, array_view<const float, 2> src_array, array_view<float, 2> dest_array
 		, float low_thresh, float high_thresh, bool l2_grad = false)
 	{
-		if(low_thresh > high_thresh)
+		if (low_thresh > high_thresh)
 			std::swap(low_thresh, high_thresh);
 		static const int tile_size = 32;
 		// fill 0.0f
@@ -434,5 +434,5 @@ namespace amp
 		detail::canny_edge_hysteresis_global(ctx);
 		detail::canny_get_edges(ctx, dest_array);
 	}
-	
+
 }

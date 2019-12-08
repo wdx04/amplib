@@ -410,7 +410,7 @@ namespace amp
 			for(i = 0; i <= LAB_CBRT_TAB_SIZE; i++)
 			{
 				float x = i*scale;
-				f[i] = x < 0.008856f ? x*7.787f + 0.13793103448275862f : cvCbrt(x);
+				f[i] = x < 0.008856f ? x*7.787f + 0.13793103448275862f : cv::cubeRoot(x);
 			}
 			splineBuild(f, LAB_CBRT_TAB_SIZE, LabCbrtTab);
 

@@ -8,6 +8,7 @@
 #include <fstream>
 #include <algorithm>
 #include <numeric>
+#include <mutex>
 #include <initializer_list>
 #include <amp.h>
 #include <amp_math.h>
@@ -368,7 +369,8 @@ namespace amp
 
 	namespace detail
 	{
-		inline void load_cv_mat_8u_c1(accelerator_view& acc_view, array_view<const unsigned int, 1> srcArray, int row_step, array_view<float, 2> destArray)
+		template<typename value_type>
+		inline void load_cv_mat_8u_c1(accelerator_view& acc_view, array_view<const unsigned int, 1> srcArray, int row_step, array_view<value_type, 2> destArray)
 		{
 			static const int tile_size = 32;
 			destArray.discard_data();
@@ -376,11 +378,12 @@ namespace amp
 			{
 				int src_byte_index = idx.global[0] * row_step + idx.global[1];
 				unsigned int pix4_val = guarded_read(srcArray, concurrency::index<1>(src_byte_index / 4));
-				guarded_write(destArray, idx.global, float((pix4_val >> ((src_byte_index % 4) << 3)) & 0xffu));
+				guarded_write(destArray, idx.global, value_type((pix4_val >> ((src_byte_index % 4) << 3)) & 0xffu));
 			});
 		}
 
-		inline void load_cv_mat_16u_c1(accelerator_view& acc_view, array_view<const unsigned int, 1> srcArray, int row_step, array_view<float, 2> destArray, float scale = 255.0f / 4095.0f)
+		template<typename value_type>
+		inline void load_cv_mat_16u_c1(accelerator_view& acc_view, array_view<const unsigned int, 1> srcArray, int row_step, array_view<value_type, 2> destArray, float scale = 255.0f / 4095.0f)
 		{
 			static const int tile_size = 32;
 			destArray.discard_data();
@@ -388,7 +391,7 @@ namespace amp
 			{
 				int src_byte_index = idx.global[0] * row_step + idx.global[1] * 2;
 				unsigned int pix2_val = guarded_read(srcArray, concurrency::index<1>(src_byte_index / 4));
-				guarded_write(destArray, idx.global, float((pix2_val >> ((src_byte_index % 4) << 3)) & 0xffffu) * scale);
+				guarded_write(destArray, idx.global, value_type(float((pix2_val >> ((src_byte_index % 4) << 3)) & 0xffffu) * scale));
 			});
 		}
 
@@ -510,6 +513,10 @@ namespace amp
 			int1d.reserve(buffer_size);
 		}
 
+		~vision_context()
+		{
+			acc_view.wait();
+		}
 
 		// Create/Clear operation buffers
 		int create_float2d_buf(int rows, int cols, int count = 1)
@@ -567,6 +574,7 @@ namespace amp
 		// OpenCV Mat upload/download support(8UC1 & 8UC3, 16UC1 & 16UC3[load only])
 		bool load_cv_mat(const cv::Mat& srcMat, array_view<float, 2> destView)
 		{
+			std::lock_guard<std::mutex> guard(save_load_mutex);
 			// check Mat type and size
 			if ((srcMat.type() != CV_8UC1 && srcMat.type() != CV_16UC1) || srcMat.rows != destView.get_extent()[0] || srcMat.cols != destView.get_extent()[1])
 			{
@@ -593,17 +601,56 @@ namespace amp
             // convert data
 			if (srcMat.type() == CV_8UC1)
 			{
-				detail::load_cv_mat_8u_c1(acc_view, save_load_buf, continousMat.step[0], destView);
+				detail::load_cv_mat_8u_c1<float>(acc_view, save_load_buf, continousMat.step[0], destView);
 			}
 			else // CV_16UC1
 			{
-				detail::load_cv_mat_16u_c1(acc_view, save_load_buf, continousMat.step[0], destView);
+				detail::load_cv_mat_16u_c1<float>(acc_view, save_load_buf, continousMat.step[0], destView);
+			}
+			return true;
+		}
+
+		bool load_cv_mat(const cv::Mat& srcMat, array_view<int, 2> destView)
+		{
+			std::lock_guard<std::mutex> guard(save_load_mutex);
+			// check Mat type and size
+			if ((srcMat.type() != CV_8UC1 && srcMat.type() != CV_16UC1) || srcMat.rows != destView.get_extent()[0] || srcMat.cols != destView.get_extent()[1])
+			{
+				return false;
+			}
+			// clone if source Mat is not continuous
+			cv::Mat continousMat;
+			if (!srcMat.isContinuous())
+			{
+				srcMat.copyTo(continousMat);
+			}
+			else
+			{
+				continousMat = srcMat;
+			}
+			// check required buffer size
+			int source_dword_count = (continousMat.rows * int(continousMat.step[0]) + 3) / 4;
+			if (source_dword_count > save_load_buf.get_extent()[0])
+			{
+				std::swap(save_load_buf, concurrency::array<unsigned int, 1>(ROUNDUP(source_dword_count, 64), acc_view));
+			}
+			// copy data to GPU
+			concurrency::copy(continousMat.ptr<unsigned int>(), continousMat.ptr<unsigned int>() + source_dword_count, save_load_buf.section(0, source_dword_count));
+			// convert data
+			if (srcMat.type() == CV_8UC1)
+			{
+				detail::load_cv_mat_8u_c1<int>(acc_view, save_load_buf, continousMat.step[0], destView);
+			}
+			else // CV_16UC1
+			{
+				detail::load_cv_mat_16u_c1<int>(acc_view, save_load_buf, continousMat.step[0], destView);
 			}
 			return true;
 		}
 
 		bool save_cv_mat(array_view<const float, 2> srcView, cv::Mat& destMat)
 		{
+			std::lock_guard<std::mutex> guard(save_load_mutex);
 			int row_step = destMat.step[0];
 			// check destMat type and size
 			if(destMat.type() != CV_8UC1 || destMat.rows != srcView.get_extent()[0] || destMat.cols != srcView.get_extent()[1] || !destMat.isContinuous())
@@ -627,6 +674,7 @@ namespace amp
 
 		bool load_cv_mat(const cv::Mat& srcMat, array_view<float, 2> destChannel1, array_view<float, 2> destChannel2, array_view<float, 2> destChannel3)
 		{
+			std::lock_guard<std::mutex> guard(save_load_mutex);
 			// check Mat type and size
 			if ((srcMat.type() != CV_8UC3 && srcMat.type() != CV_16UC3) || srcMat.rows != destChannel1.get_extent()[0] || srcMat.cols != destChannel1.get_extent()[1])
 			{
@@ -664,6 +712,7 @@ namespace amp
 
 		bool save_cv_mat(array_view<const float, 2> srcChannel1, array_view<const float, 2> srcChannel2, array_view<const float, 2> srcChannel3, cv::Mat& destMat)
 		{
+			std::lock_guard<std::mutex> guard(save_load_mutex);
 			int row_step = destMat.step[0];
 			// check destMat type and size
 			if(destMat.type() != CV_8UC3 || destMat.rows != srcChannel1.get_extent()[0] || destMat.cols != srcChannel1.get_extent()[1] || !destMat.isContinuous())
@@ -688,6 +737,7 @@ namespace amp
 	public:
 		accelerator_view acc_view;
 		concurrency::array<unsigned int, 1> save_load_buf;
+		std::mutex save_load_mutex;
 		std::vector<concurrency::array<float, 2>> float2d;
 		std::vector<concurrency::array<float, 1>> float1d;
 		std::vector<concurrency::array<int, 2>> int2d;

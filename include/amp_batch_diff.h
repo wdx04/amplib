@@ -50,7 +50,8 @@ namespace amp
 		return result;
 	}
 
-	inline void load_ref_images(vision_context& ctx, const std::vector<cv::Mat>& ref_images, int translation_steps = 2, int rotation_steps = 10, float border_value = 255.0F)
+	inline void load_ref_images(vision_context& ctx, const std::vector<cv::Mat>& ref_images, int translation_steps = 2, int rotation_steps = 10
+		, float border_value = 255.0F, float translation_interval = 1.0f, float rotation_interval = 0.1f)
 	{
 		// ref images are loaded into ctx.float2d[0],[1],...
 		int translation_count = translation_steps * 2 + 1;
@@ -68,9 +69,9 @@ namespace amp
 					for (int k = -rotation_steps; k <= rotation_steps; k++)
 					{
 						int index = (jx + translation_steps) * rotation_count * translation_count + (jy + translation_steps) * rotation_count + (k + rotation_steps);
-						float translation_x = float(jx);
-						float translation_y = float(jy);
-						float rotation = 0.1f * float(k);
+						float translation_x = float(jx) * translation_interval;
+						float translation_y = float(jy) * translation_interval;
+						float rotation = float(k) * rotation_interval;
 						amp::warp_affine_linear_32f_c1(ctx.acc_view, gpu_ref_image, gpu_result_image[index], get_euclidean_transform(translation_x, translation_y, rotation), border_value);
 					}
 				}

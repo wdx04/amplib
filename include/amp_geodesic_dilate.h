@@ -162,7 +162,9 @@ namespace amp
 					dest_array(idx.global) = new_value;
 					if (old_value != new_value)
 					{
-						shared_queue[concurrency::atomic_fetch_inc(&shared_queue_index)] = int_2(col, row);
+						int index = concurrency::atomic_fetch_inc(&shared_queue_index);
+						shared_queue[index].x = col;
+						shared_queue[index].y = row;
 					}
 				}
 				idx.barrier.wait_with_tile_static_memory_fence();
